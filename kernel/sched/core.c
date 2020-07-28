@@ -10208,6 +10208,10 @@ void __init sched_init(void)
 
 	calc_load_update = jiffies + LOAD_FREQ;
 
+#ifdef CONFIG_SCHED_INFO
+	sched_info_update = jiffies + SCHED_INFO_FREQ;
+#endif
+
 #ifdef CONFIG_SMP
 	idle_thread_set_boot_cpu();
 	balance_push_set(smp_processor_id(), false);

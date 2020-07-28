@@ -212,6 +212,7 @@ static inline void sched_info_dequeue(struct rq *rq, struct task_struct *t)
 	delta = rq_clock(rq) - t->sched_info.last_queued;
 	t->sched_info.last_queued = 0;
 	t->sched_info.run_delay += delta;
+	t->sched_info.run_delay_migrations += delta;
 
 	rq_sched_info_dequeue(rq, delta);
 }
@@ -223,19 +224,31 @@ static inline void sched_info_dequeue(struct rq *rq, struct task_struct *t)
  */
 static void sched_info_arrive(struct rq *rq, struct task_struct *t)
 {
-	unsigned long long now, delta = 0;
+	unsigned long long now, delta = 0, total_delta;
 
-	if (!t->sched_info.last_queued)
-		return;
+	if (t->sched_info.last_queued) {
+		now = rq_clock(rq);
+		delta = now - t->sched_info.last_queued;
+		t->sched_info.last_queued = 0;
+		t->sched_info.run_delay += delta;
+		t->sched_info.last_arrival = now;
+		t->sched_info.pcount++;
+	}
 
-	now = rq_clock(rq);
-	delta = now - t->sched_info.last_queued;
-	t->sched_info.last_queued = 0;
-	t->sched_info.run_delay += delta;
-	t->sched_info.last_arrival = now;
-	t->sched_info.pcount++;
+	/*
+	 * Atomic values are used here to avoid races when resetting the
+	 * run_delay_max_current value in the timer. Such a race could lead to
+	 * losing local maxima between reading the run_delay_max_current value
+	 * and resetting it.
+	 */
+	total_delta = t->sched_info.run_delay_migrations + delta;
+	if (atomic64_read(&t->sched_info.run_delay_max_current) < total_delta)
+		atomic64_set(&t->sched_info.run_delay_max_current, total_delta);
 
-	rq_sched_info_arrive(rq, delta);
+	t->sched_info.run_delay_migrations = 0;
+
+	if (delta)
+		rq_sched_info_arrive(rq, delta);
 }
 
 /*

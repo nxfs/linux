@@ -13,6 +13,8 @@
 #include <linux/sched.h>
 #include <linux/sched/loadavg.h>
 #include <linux/sched/clock.h>
+#include <linux/sched/sched_info.h>
+#include <linux/sched/stat.h>
 #include <linux/syscore_ops.h>
 #include <linux/clocksource.h>
 #include <linux/jiffies.h>
@@ -2290,6 +2292,11 @@ void do_timer(unsigned long ticks)
 {
 	jiffies_64 += ticks;
 	calc_global_load();
+
+#ifdef CONFIG_SCHED_INFO
+	if (likely(sched_info_on()))
+		calc_global_sched_info();
+#endif
 }
 
 /**

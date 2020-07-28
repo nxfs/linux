@@ -401,6 +401,17 @@ struct sched_info {
 	/* When were we last queued to run? */
 	unsigned long long		last_queued;
 
+	/* Statistics: */
+
+	/* Accumulator used to store run_delay due to CPU migrations */
+	unsigned long long		run_delay_migrations;
+
+	/* The maximum run delay since last minutely reset */
+	atomic64_t			run_delay_max_current;
+
+	/* The maximum run delay in the last minute */
+	unsigned long long		run_delay_max_1m;
+
 #endif /* CONFIG_SCHED_INFO */
 };
 
