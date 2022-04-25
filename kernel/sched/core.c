@@ -11392,8 +11392,65 @@ static ssize_t cpu_max_write(struct kernfs_open_file *of,
 }
 #endif
 
+#ifdef CONFIG_FAIR_GROUP_SCHED
+
+static const char *sched_cpu_affinity_str[] = {
+	[SCHED_CPU_AFFINITY_NONE] = "none",
+	[SCHED_CPU_AFFINITY_CORE] = "core"
+};
+
+static int sched_cpu_affinity_show(struct seq_file *sf, void *v)
+{
+	struct task_group *tg = css_tg(seq_css(sf));
+
+	seq_printf(sf, "%s\n", sched_cpu_affinity_str[tg->cpu_affinity]);
+	return 0;
+}
+
+static int tg_set_sched_cpu_affinity(struct task_group *tg, enum sched_cpu_affinity_type affinity)
+{
+	if (tg == &root_task_group)
+		return -EINVAL;
+
+	tg->cpu_affinity = affinity;
+
+	return 0;
+}
+
+static int parse_sched_cpu_affinity(char *buf, enum sched_cpu_affinity_type *af)
+{
+	buf = strim(buf);
+	for (*af = SCHED_CPU_AFFINITY_NONE; *af != SCHED_CPU_AFFINITY_END; ++*af) {
+		if (!strcmp(buf, sched_cpu_affinity_str[*af]))
+			return 0;
+	}
+
+	return -EINVAL;
+}
+
+static ssize_t sched_cpu_affinity_write(struct kernfs_open_file *of,
+					char *buf, size_t nbytes, loff_t off)
+{
+	enum sched_cpu_affinity_type affinity;
+	struct task_group *tg = css_tg(of_css(of));
+
+	if (parse_sched_cpu_affinity(buf, &affinity))
+		return -EINVAL;
+	if (tg_set_sched_cpu_affinity(tg, affinity))
+		return -EINVAL;
+
+	return nbytes;
+}
+#endif
+
 static struct cftype cpu_files[] = {
 #ifdef CONFIG_FAIR_GROUP_SCHED
+	{
+		.name = "affinity",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.seq_show = sched_cpu_affinity_show,
+		.write = sched_cpu_affinity_write,
+	},
 	{
 		.name = "weight",
 		.flags = CFTYPE_NOT_ON_ROOT,

@@ -373,6 +373,14 @@ struct cfs_bandwidth {
 #endif
 };
 
+#ifdef CONFIG_FAIR_GROUP_SCHED
+enum sched_cpu_affinity_type {
+	SCHED_CPU_AFFINITY_NONE = 0,
+	SCHED_CPU_AFFINITY_CORE = 1,
+	SCHED_CPU_AFFINITY_END
+};
+#endif
+
 /* Task group related information */
 struct task_group {
 	struct cgroup_subsys_state css;
@@ -387,6 +395,7 @@ struct task_group {
 	/* A positive value indicates that this is a SCHED_IDLE group. */
 	int			idle;
 
+	enum sched_cpu_affinity_type cpu_affinity;
 #ifdef	CONFIG_SMP
 	/*
 	 * load_avg can be heavily contended at clock tick time, so put
@@ -505,8 +514,19 @@ extern void sched_move_task(struct task_struct *tsk);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 extern int sched_group_set_shares(struct task_group *tg, unsigned long shares);
-
 extern int sched_group_set_idle(struct task_group *tg, long idle);
+
+#ifdef CONFIG_SCHED_CORE
+static inline bool tg_wants_core_affinity(const struct task_group *tg)
+{
+	return tg && tg->cpu_affinity == SCHED_CPU_AFFINITY_CORE;
+}
+#else /* !CONFIG_SCHED_CORE */
+static inline bool tg_wants_core_affinity(const struct task_group *tg)
+{
+	return false;
+}
+#endif
 
 #ifdef CONFIG_SMP
 extern void set_task_rq_fair(struct sched_entity *se,
@@ -515,6 +535,11 @@ extern void set_task_rq_fair(struct sched_entity *se,
 static inline void set_task_rq_fair(struct sched_entity *se,
 			     struct cfs_rq *prev, struct cfs_rq *next) { }
 #endif /* CONFIG_SMP */
+#else /* !CONFIG_FAIR_GROUP_SCHED */
+static inline bool tg_wants_core_affinity(const struct task_group *tg)
+{
+	return false;
+}
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
 #else /* CONFIG_CGROUP_SCHED */
