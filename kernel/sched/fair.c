@@ -856,6 +856,16 @@ struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
 	return __node_2_se(left);
 }
 
+static struct sched_entity *__pick_next_entity(struct sched_entity *se)
+{
+	struct rb_node *next = rb_next(&se->run_node);
+
+	if (!next)
+		return NULL;
+
+	return __node_2_se(next);
+}
+
 /*
  * Earliest Eligible Virtual Deadline First
  *
@@ -9186,8 +9196,10 @@ static int detach_tasks(struct lb_env *env)
 				 */
 				if (detached && tg_load > env->imbalance)
 					goto next;
+				env->imbalance -= tg_load;
+			} else {
+				env->imbalance -= load;
 			}
-			env->imbalance -= load;
 			break;
 
 		case migrate_util:
@@ -9197,12 +9209,13 @@ static int detach_tasks(struct lb_env *env)
 				goto next;
 
 			tg_util = task_group_smt_util_est(p, env);
-
 			if (tg_util > util) {
 				if (tg_util > env->imbalance)
 					goto next;
+				env->imbalance -= tg_util;
+			} else {
+				env->imbalance -= util;
 			}
-			env->imbalance -= util;
 			break;
 
 		case migrate_task:
@@ -11350,6 +11363,72 @@ static int should_we_balance(struct lb_env *env)
 }
 
 /*
+ * Detach all tasks on src_cpu's cfs_rq of the task group
+ *
+ * Returns number of detached tasks if successful and 0 otherwise.
+ */
+static inline int detach_tasks_in_group(struct lb_env *env, struct task_group *tg)
+{
+	struct sched_entity *se, *next;
+	struct task_struct *p;
+
+	int src_cpu = env->src_cpu;
+	struct cfs_rq *cfs_rq = tg->cfs_rq[src_cpu];
+	int detached = 0;
+
+	for (se = __pick_first_entity(cfs_rq); se; se = next) {
+		next = __pick_next_entity(se);
+
+		p = task_of(se);
+		if (!can_migrate_task(p, env))
+			continue;
+
+		detach_task(p, env);
+		list_add(&p->se.group_node, &env->tasks);
+		detached++;
+	}
+
+	return detached;
+}
+
+/*
+ * For each detached tasks, check the core cookie and find matching tasks in sibling rq.
+ *
+ * Returns number of detached tasks if successful and 0 otherwise.
+ */
+static int detach_tasks_core_affine_group(struct lb_env *env, struct lb_env *smt_sibling_env)
+{
+	struct task_struct *p;
+	struct task_group *tg;
+	const struct cpumask *smt_mask = cpu_smt_mask(env->src_cpu);
+	int detached = 0;
+
+	lockdep_assert_irqs_disabled();
+
+	list_for_each_entry(p, &env->tasks, se.group_node) {
+		int i;
+
+		tg = task_group(p);
+		if (!tg_wants_core_affinity(tg))
+			continue;
+
+		for_each_cpu(i, smt_mask) {
+			struct rq_flags rf;
+			struct rq *src_sibling_rq = cpu_rq(i);
+
+			smt_sibling_env->src_cpu = i;
+			smt_sibling_env->src_rq = src_sibling_rq;
+
+			rq_lock(src_sibling_rq, &rf);
+			update_rq_clock(src_sibling_rq);
+			detached += detach_tasks_in_group(smt_sibling_env, tg);
+			rq_unlock(src_sibling_rq, &rf);
+		}
+	}
+	return detached;
+}
+
+/*
  * Check this_cpu to ensure it is balanced within domain. Attempt to move
  * tasks if there is an imbalance.
  */
@@ -11357,12 +11436,15 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 			struct sched_domain *sd, enum cpu_idle_type idle,
 			int *continue_balancing)
 {
-	int ld_moved, cur_ld_moved, active_balance = 0;
+	int ld_moved, cur_ld_moved, cur_ld_moved_core_affine, active_balance = 0;
 	struct sched_domain *sd_parent = sd->parent;
 	struct sched_group *group;
 	struct rq *busiest;
 	struct rq_flags rf;
 	struct cpumask *cpus = this_cpu_cpumask_var_ptr(load_balance_mask);
+	const struct cpumask *smt_mask = cpu_smt_mask(this_cpu);
+	const int sibling_cpu = cpumask_any_but(smt_mask, this_cpu);
+
 	struct lb_env env = {
 		.sd		= sd,
 		.dst_cpu	= this_cpu,
@@ -11374,6 +11456,12 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 		.fbq_type	= all,
 		.tasks		= LIST_HEAD_INIT(env.tasks),
 	};
+
+	struct lb_env smt_sibling_env = env;
+
+	INIT_LIST_HEAD(&smt_sibling_env.tasks);
+	smt_sibling_env.dst_cpu = sibling_cpu;
+	smt_sibling_env.dst_rq = cpu_rq(sibling_cpu);
 
 	cpumask_and(cpus, sched_domain_span(sd), cpu_active_mask);
 
@@ -11435,6 +11523,18 @@ more_balance:
 		 */
 
 		rq_unlock(busiest, &rf);
+
+		/*
+		 * Detach other tasks with same cookies
+		 */
+		if (env.sd->level > 0) {
+			cur_ld_moved_core_affine = detach_tasks_core_affine_group(&env,
+				&smt_sibling_env);
+			if (cur_ld_moved_core_affine) {
+				attach_tasks(&smt_sibling_env);
+				ld_moved += cur_ld_moved_core_affine;
+			}
+		}
 
 		if (cur_ld_moved) {
 			attach_tasks(&env);
