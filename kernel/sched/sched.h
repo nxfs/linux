@@ -1195,6 +1195,10 @@ struct rq {
 	unsigned int		core_forceidle_seq;
 	unsigned int		core_forceidle_occupation;
 	u64			core_forceidle_start;
+
+	unsigned int		core_cookie_steal_busy;
+	struct cpu_stop_work	core_cookie_steal_work;
+	unsigned int		core_cookie_steal_cpu;
 #endif
 
 	/* Scratch cpumask to be temporarily used under rq_lock */

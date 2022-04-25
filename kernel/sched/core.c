@@ -2731,6 +2731,52 @@ out_unlock:
 	return 0;
 }
 
+#ifdef CONFIG_SCHED_CORE
+/*
+ * Based off migration_cpu_stop
+ */
+static int steal_cookie_cpu_stop(void *data)
+{
+	struct task_struct *p = data;
+	struct rq *rq = this_rq();
+	struct rq_flags rf;
+	struct rq *src_rq, *dst_rq;
+	int dest_cpu;
+
+	local_irq_save(rf.flags);
+	flush_smp_call_function_queue();
+
+	raw_spin_lock(&p->pi_lock);
+	rq_lock(rq, &rf);
+
+	src_rq = task_rq(p);
+	dest_cpu = rq->core_cookie_steal_cpu;
+	dst_rq = cpu_rq(dest_cpu);
+
+	WARN_ON_ONCE(!rq->core_cookie_steal_busy);
+	rq->core_cookie_steal_busy = false;
+	if (src_rq != rq)
+		goto out;
+
+	if (is_migration_disabled(p))
+		goto out;
+
+	if (!task_on_rq_queued(p)) {
+		p->wake_cpu = dest_cpu;
+		goto out;
+	}
+
+	update_rq_clock(rq);
+	// src rq lock released, dest rq lock taken
+	rq = __migrate_task(src_rq, &rf, p, dest_cpu);
+
+out:
+	task_rq_unlock(rq, p, &rf);
+	put_task_struct(p);
+	return 0;
+}
+#endif
+
 /*
  * sched_class::set_cpus_allowed must do the below, but is not required to
  * actually call this function.
@@ -6322,6 +6368,40 @@ out:
 	return next;
 }
 
+static bool try_steal_cookie_curr(struct rq *src, struct rq *dst)
+{
+	if (src->core_cookie_steal_busy)
+		return false;
+
+	src->core_cookie_steal_busy = true;
+	src->core_cookie_steal_cpu = dst->cpu;
+	return true;
+}
+
+
+/*
+ * The task we are going to steal is on the same core.
+ * Only steal if
+ * 1) the destination cpu has no tasks from this group
+ * 2) and the src cpu has more than 1 tasks from this group
+ */
+static
+bool tg_affinity_should_steal_cookie(struct task_struct *p, struct rq *src, struct rq *dst)
+{
+	struct task_group *tg = task_group(p);
+	const struct cpumask *smt_mask = cpu_smt_mask(src->cpu);
+	struct cfs_rq *cfs_rq_src = tg->cfs_rq[src->cpu];
+	struct cfs_rq *cfs_rq_dst = tg->cfs_rq[dst->cpu];
+
+	if (cpumask_test_cpu(dst->cpu, smt_mask)) {
+		if (cfs_rq_dst->h_nr_running > 0)
+			return false;
+		if (cfs_rq_src->h_nr_running == 1)
+			return false;
+	}
+	return true;
+}
+
 static bool try_steal_cookie(int this, int that)
 {
 	struct rq *dst = cpu_rq(this), *src = cpu_rq(that);
@@ -6329,22 +6409,26 @@ static bool try_steal_cookie(int this, int that)
 	unsigned long cookie;
 	bool success = false;
 
+	bool steal_cookie_curr = false;
+
 	guard(irq)();
-	guard(double_rq_lock)(dst, src);
+	double_rq_lock(dst, src);
 
 	cookie = dst->core->core_cookie;
 	if (!cookie)
-		return false;
+		goto unlock;
 
 	if (dst->curr != dst->idle)
-		return false;
+		goto unlock;
 
 	p = sched_core_find(src, cookie);
 	if (!p)
-		return false;
+		goto unlock;
 
 	do {
-		if (p == src->core_pick || p == src->curr)
+		struct task_group *tg;
+
+		if (p == src->core_pick)
 			goto next;
 
 		if (!is_cpu_allowed(p, this))
@@ -6361,6 +6445,22 @@ static bool try_steal_cookie(int this, int that)
 		if (sched_task_is_throttled(p, this))
 			goto next;
 
+		tg = task_group(p);
+		if (tg_wants_core_affinity(tg) &&
+				!tg_affinity_should_steal_cookie(p, src, dst))
+			goto next;
+
+		if (p == src->curr) {
+			if (!tg_wants_core_affinity(tg))
+				goto next;
+
+			if (try_steal_cookie_curr(src, dst)) {
+				steal_cookie_curr = true;
+				goto unlock;
+			}
+			goto next;
+		}
+
 		deactivate_task(src, p, 0);
 		set_task_cpu(p, this);
 		activate_task(dst, p, 0);
@@ -6373,6 +6473,14 @@ static bool try_steal_cookie(int this, int that)
 next:
 		p = sched_core_next(p, cookie);
 	} while (p);
+
+unlock:
+	double_rq_unlock(dst, src);
+	if (steal_cookie_curr) {
+		get_task_struct(p);
+		success = stop_one_cpu_nowait(that, steal_cookie_cpu_stop, p,
+			&src->core_cookie_steal_work);
+	}
 
 	return success;
 }
