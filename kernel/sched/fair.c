@@ -1006,6 +1006,7 @@ static void update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 static int select_idle_sibling(struct task_struct *p, int prev_cpu, int cpu);
 static unsigned long task_h_load(struct task_struct *p);
+static unsigned long cfs_rq_h_load(struct cfs_rq *cfs_rq);
 static unsigned long capacity_of(int cpu);
 
 /* Give new sched_entity start runnable values to heavy its load in infant time */
@@ -9038,6 +9039,60 @@ static struct task_struct *detach_one_task(struct lb_env *env)
 	return NULL;
 }
 
+static __always_inline unsigned long tg_smt_accumulate(struct task_struct *p,
+	const struct lb_env *env, unsigned long (fn)(struct cfs_rq *))
+{
+	const struct cpumask *smt_mask;
+	const struct task_group *tg = task_group(p);
+	unsigned long result = 0;
+	int i;
+
+	if (!tg_wants_core_affinity(tg) || env->sd->level < 1)
+		return 0;
+
+	smt_mask = cpu_smt_mask(task_cpu(p));
+	for_each_cpu(i, smt_mask) {
+		result += fn(tg->cfs_rq[i]);
+	}
+	return result;
+}
+
+static inline unsigned long task_group_smt_h_load(struct task_struct *p, const struct lb_env *env)
+{
+	return tg_smt_accumulate(p, env, cfs_rq_h_load);
+}
+
+static inline unsigned long cfs_rq_util_est_avg(struct cfs_rq *cfs_rq)
+{
+	return READ_ONCE(cfs_rq->avg.util_est) & ~UTIL_AVG_UNCHANGED;
+}
+
+static inline unsigned long task_group_smt_util_est(struct task_struct *p, const struct lb_env *env)
+{
+	return tg_smt_accumulate(p, env, cfs_rq_util_est_avg);
+}
+
+/*
+ * can_migrate_task_group() - Not allowing migration between siblings, when
+ * the source rq only has 1 task. This prevents tasks with same cookies
+ * being all migrated to same cpu.
+ */
+static
+int can_migrate_task_group(struct task_struct *p, const struct lb_env *env)
+{
+	struct task_group *tg = task_group(p);
+	struct cfs_rq *cfs_rq_src;
+
+	if (!tg_wants_core_affinity(tg))
+		return 1;
+
+	cfs_rq_src = tg->cfs_rq[env->src_cpu];
+	if (env->sd->level == 0 && cfs_rq_src->h_nr_running == 1)
+		return 0;
+
+	return 1;
+}
+
 /*
  * detach_tasks() -- tries to detach up to imbalance load/util/tasks from
  * busiest_rq, as part of a balancing operation within domain "sd".
@@ -9047,7 +9102,7 @@ static struct task_struct *detach_one_task(struct lb_env *env)
 static int detach_tasks(struct lb_env *env)
 {
 	struct list_head *tasks = &env->src_rq->cfs_tasks;
-	unsigned long util, load;
+	unsigned long util, load, tg_util, tg_load;
 	struct task_struct *p;
 	int detached = 0;
 
@@ -9094,6 +9149,9 @@ static int detach_tasks(struct lb_env *env)
 		if (!can_migrate_task(p, env))
 			goto next;
 
+		if (!can_migrate_task_group(p, env))
+			goto next;
+
 		switch (env->migration_type) {
 		case migrate_load:
 			/*
@@ -9118,6 +9176,17 @@ static int detach_tasks(struct lb_env *env)
 			if (shr_bound(load, env->sd->nr_balance_failed) > env->imbalance)
 				goto next;
 
+			tg_load = max_t(unsigned long, task_group_smt_h_load(p, env), 1);
+			if (tg_load > load) {
+				if (shr_bound(tg_load, env->sd->nr_balance_failed) > env->imbalance)
+					goto next;
+				/*
+				 * To avoid inflated nr_balance_failed causing too many tasks being
+				 * migrated at once, cascading down to rq one by one.
+				 */
+				if (detached && tg_load > env->imbalance)
+					goto next;
+			}
 			env->imbalance -= load;
 			break;
 
@@ -9127,6 +9196,12 @@ static int detach_tasks(struct lb_env *env)
 			if (shr_bound(util, env->sd->nr_balance_failed) > env->imbalance)
 				goto next;
 
+			tg_util = task_group_smt_util_est(p, env);
+
+			if (tg_util > util) {
+				if (tg_util > env->imbalance)
+					goto next;
+			}
 			env->imbalance -= util;
 			break;
 
@@ -9394,6 +9469,12 @@ static unsigned long task_h_load(struct task_struct *p)
 	return div64_ul(p->se.avg.load_avg * cfs_rq->h_load,
 			cfs_rq_load_avg(cfs_rq) + 1);
 }
+
+static inline unsigned long cfs_rq_h_load(struct cfs_rq *cfs_rq)
+{
+	update_cfs_rq_h_load(cfs_rq);
+	return max_t(unsigned long, cfs_rq->h_load, 1);
+}
 #else
 static bool __update_blocked_fair(struct rq *rq, bool *done)
 {
@@ -9410,6 +9491,11 @@ static bool __update_blocked_fair(struct rq *rq, bool *done)
 static unsigned long task_h_load(struct task_struct *p)
 {
 	return p->se.avg.load_avg;
+}
+
+static inline unsigned long cfs_rq_h_load(struct cfs_rq *cfs_rq)
+{
+	return cfs_rq->avg.load_avg;
 }
 #endif
 
