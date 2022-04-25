@@ -6362,7 +6362,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 out_set_next:
 	set_next_task(rq, next);
 out:
-	if (rq->core->core_forceidle_count && next == rq->idle)
+	if (next == rq->idle)
 		queue_core_balance(rq);
 
 	return next;
@@ -6523,17 +6523,25 @@ static void sched_core_balance(struct rq *rq)
 }
 
 static DEFINE_PER_CPU(struct balance_callback, core_balance_head);
+static DEFINE_PER_CPU(unsigned long, queue_core_next_balance);
 
 static void queue_core_balance(struct rq *rq)
 {
+	unsigned long next_balance;
+
 	if (!sched_core_enabled(rq))
 		return;
 
 	if (!rq->core->core_cookie)
 		return;
 
-	if (!rq->nr_running) /* not forced idle */
+	next_balance = per_cpu(queue_core_next_balance, rq->cpu);
+
+	/* not forced idle and before next periodic balance */
+	if (!rq->nr_running && !!next_balance && !time_after(jiffies, next_balance))
 		return;
+
+	per_cpu(queue_core_next_balance, rq->cpu) = jiffies + msecs_to_jiffies(MSEC_PER_SEC);
 
 	queue_balance_callback(rq, &per_cpu(core_balance_head, rq->cpu), sched_core_balance);
 }
