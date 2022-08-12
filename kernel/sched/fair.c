@@ -11630,6 +11630,7 @@ more_balance:
 
 		if (need_active_balance(&env)) {
 			unsigned long flags;
+			struct task_group *tg;
 
 			raw_spin_rq_lock_irqsave(busiest, flags);
 
@@ -11639,6 +11640,17 @@ more_balance:
 			 * moved to this_cpu:
 			 */
 			if (!cpumask_test_cpu(this_cpu, busiest->curr->cpus_ptr)) {
+				raw_spin_rq_unlock_irqrestore(busiest, flags);
+				goto out_one_pinned;
+			}
+
+			/*
+			 * Don't kick the active_load_balance_cpu_stop,
+			 * if the curr task on busiest CPU belongs to
+			 * a core affine group:
+			 */
+			tg = task_group(busiest->curr);
+			if (tg_wants_core_affinity(tg) && sd->level > 0) {
 				raw_spin_rq_unlock_irqrestore(busiest, flags);
 				goto out_one_pinned;
 			}
