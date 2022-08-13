@@ -203,17 +203,7 @@ static inline bool prio_less(const struct task_struct *a,
 static inline bool __sched_core_less(const struct task_struct *a,
 				     const struct task_struct *b)
 {
-	if (a->core_cookie < b->core_cookie)
-		return true;
-
-	if (a->core_cookie > b->core_cookie)
-		return false;
-
-	/* flip prio, so high prio is leftmost */
-	if (prio_less(b, a, !!task_rq(a)->core->core_forceidle_count))
-		return true;
-
-	return false;
+	return a->core_cookie < b->core_cookie;
 }
 
 #define __node_2_sc(node) rb_entry((node), struct task_struct, core_node)
@@ -311,6 +301,37 @@ static struct task_struct *sched_core_find(struct rq *rq, unsigned long cookie)
 		return p;
 
 	return sched_core_next(p, cookie);
+}
+
+/*
+ * Find best (aka, highest priority) task matching @cookie, taking into account
+ * the dynamic priority of a task, like vruntime updates of CFS tasks, which
+ * are not reflected in the core_tree.
+ *
+ * Also take into account, that core scheduling may cause over-picking of tasks.
+ * Avoid picking any task, if things get too unfair. Go force-idle instead.
+ *
+ * This is still a poor imitation of at least the CFS task selection. Buddies
+ * are ignored in cfs_prio_less(), for example.
+ */
+static struct task_struct *sched_core_best(struct rq *rq, unsigned long cookie,
+					   bool in_fi)
+{
+	struct task_struct *best = sched_core_find(rq, cookie);
+	struct task_struct *p = best;
+
+	if (best == rq->idle)
+		return best;
+
+	while ((p = sched_core_next(p, cookie))) {
+		if (prio_less(best, p, in_fi))
+			best = p;
+	}
+
+	if (may_pick_task(rq, best))
+		return best;
+
+	return idle_sched_class.pick_task(rq);
 }
 
 /*
@@ -6279,7 +6300,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 		if (!cookie_equals(p, cookie)) {
 			p = NULL;
 			if (cookie)
-				p = sched_core_find(rq_i, cookie);
+				p = sched_core_best(rq_i, cookie, fi_before);
 			if (!p)
 				p = idle_sched_class.pick_task(rq_i);
 		}

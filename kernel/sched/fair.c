@@ -8391,6 +8391,60 @@ again:
 
 	return task_of(se);
 }
+
+static bool may_pick_task_fair(struct rq *rq, struct task_struct *task)
+{
+	struct sched_entity *se = &task->se;
+
+	/*
+	 * Do not allow a throttled task to execute. Doing so overspends the
+	 * group's quota and may prevent runqueues from getting unthrottled.
+	 *
+	 * FIXME: Is this superseded by the call to check_cfs_rq_runtime()
+	 *        below?
+	 */
+	if (throttled_hierarchy(cfs_rq_of(se)))
+		return false;
+
+	/*
+	 * Core scheduling picks and executes tasks out-of-order. This has the
+	 * potential to increase the vruntime spread in an unbound manner.
+	 * A task that manages to get ahead may later starve, once the load
+	 * situation changes and out-of-order picks stop happening.
+	 *
+	 * Do not allow a task to run, if any of the representing vruntimes is
+	 * already too far ahead. (The logic is similar to the handling of
+	 * the next-buddy in pick_next_entity().)
+	 *
+	 * FIXME: Can we do this from bottom to top? All pick loops go from
+	 *        top to bottom. ... looks like it, put_prev_entity() is similar.
+	 *
+	 * FIXME: Do we need to move the throttle check to cfs_prio_less(), so
+	 *        that an unfortunate late throttling is already visible in the
+	 *        priority?
+	 */
+	for_each_sched_entity(se) {
+		struct cfs_rq *cfs_rq = cfs_rq_of(se);
+		struct sched_entity *curr = cfs_rq->curr;
+		struct sched_entity *left = __pick_first_entity(cfs_rq);
+
+		if (curr) {
+			if (curr->on_rq)
+				update_curr(cfs_rq);
+			else
+				curr = NULL;
+
+			if (unlikely(check_cfs_rq_runtime(cfs_rq)))
+				return false;
+		}
+		if (!left || (curr && entity_before(curr, left)))
+			left = curr;
+		if (wakeup_preempt_entity(se, left) == 1)
+			return false;
+	}
+
+	return true;
+}
 #endif
 
 struct task_struct *
@@ -12758,6 +12812,11 @@ bool cfs_prio_less(const struct task_struct *a, const struct task_struct *b,
 
 	SCHED_WARN_ON(task_rq(b)->core != rq->core);
 
+	if (throttled_hierarchy(cfs_rq_of(seb)))
+		return false;
+	if (throttled_hierarchy(cfs_rq_of(sea)))
+		return true;
+
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	/*
 	 * Find an se in the hierarchy for tasks a and b, such that the se's
@@ -13338,6 +13397,7 @@ DEFINE_SCHED_CLASS(fair) = {
 #ifdef CONFIG_SMP
 	.balance		= balance_fair,
 	.pick_task		= pick_task_fair,
+	.may_pick_task		= may_pick_task_fair,
 	.select_task_rq		= select_task_rq_fair,
 	.migrate_task_rq	= migrate_task_rq_fair,
 

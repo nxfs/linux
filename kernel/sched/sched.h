@@ -2308,6 +2308,7 @@ struct sched_class {
 	int  (*select_task_rq)(struct task_struct *p, int task_cpu, int flags);
 
 	struct task_struct * (*pick_task)(struct rq *rq);
+	bool (*may_pick_task)(struct rq *rq, struct task_struct *task);
 
 	void (*migrate_task_rq)(struct task_struct *p, int new_cpu);
 
@@ -2360,6 +2361,12 @@ static inline void set_next_task(struct rq *rq, struct task_struct *next)
 	next->sched_class->set_next_task(rq, next, false);
 }
 
+static inline bool may_pick_task(struct rq *rq, struct task_struct *task)
+{
+	if (!task->sched_class->may_pick_task)
+		return true;
+	return task->sched_class->may_pick_task(rq, task);
+}
 
 /*
  * Helper to define a sched_class instance; each one is placed in a separate
