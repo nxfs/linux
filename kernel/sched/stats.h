@@ -217,6 +217,20 @@ static inline void sched_info_dequeue(struct rq *rq, struct task_struct *t)
 	rq_sched_info_dequeue(rq, delta);
 }
 
+static inline unsigned long long run_delay(const struct task_struct *t)
+{
+	struct rq *rq = task_rq(t);
+	unsigned long long now, delta = 0, total_delta;
+
+	if (!t->sched_info.last_queued)
+		return 0;
+
+	now = rq_clock(rq);
+	delta = now - t->sched_info.last_queued;
+	total_delta = t->sched_info.run_delay_migrations + delta;
+	return total_delta;
+}
+
 /*
  * Called when a task finally hits the CPU.  We can now calculate how
  * long it was waiting to run.  We also note when it began so that we
@@ -304,6 +318,7 @@ sched_info_switch(struct rq *rq, struct task_struct *prev, struct task_struct *n
 # define sched_info_enqueue(rq, t)	do { } while (0)
 # define sched_info_dequeue(rq, t)	do { } while (0)
 # define sched_info_switch(rq, t, next)	do { } while (0)
+# define run_delay(t)                   (0ull)
 #endif /* CONFIG_SCHED_INFO */
 
 #endif /* _KERNEL_STATS_H */

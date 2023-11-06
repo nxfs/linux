@@ -8361,37 +8361,6 @@ preempt:
 }
 
 #ifdef CONFIG_SMP
-static struct task_struct *pick_task_fair(struct rq *rq)
-{
-	struct sched_entity *se;
-	struct cfs_rq *cfs_rq;
-
-again:
-	cfs_rq = &rq->cfs;
-	if (!cfs_rq->nr_running)
-		return NULL;
-
-	do {
-		struct sched_entity *curr = cfs_rq->curr;
-
-		/* When we pick for a remote RQ, we'll not have done put_prev_entity() */
-		if (curr) {
-			if (curr->on_rq)
-				update_curr(cfs_rq);
-			else
-				curr = NULL;
-
-			if (unlikely(check_cfs_rq_runtime(cfs_rq)))
-				goto again;
-		}
-
-		se = pick_next_entity(cfs_rq);
-		cfs_rq = group_cfs_rq(se);
-	} while (cfs_rq);
-
-	return task_of(se);
-}
-
 static bool may_pick_task_fair(struct rq *rq, struct task_struct *task)
 {
 	struct sched_entity *se = &task->se;
@@ -8445,7 +8414,104 @@ static bool may_pick_task_fair(struct rq *rq, struct task_struct *task)
 
 	return true;
 }
-#endif
+
+#if defined(CONFIG_SCHED_INFO)
+static inline unsigned long long long_run_delay(struct rq *rq)
+{
+	// TODO: fix this
+	return max(rq->cfs.h_nr_running * sysctl_sched_base_slice, sysctl_sched_base_slice * 10);
+}
+
+static inline bool is_long_run_delay(struct rq *rq, unsigned long long run_delay)
+{
+	return unlikely(run_delay > long_run_delay(rq));
+}
+
+struct long_waiter_pick {
+	struct task_struct *p;
+	unsigned long long run_delay;
+};
+
+static void __pick_long_waiter(struct cfs_rq *cfs_rq, struct long_waiter_pick *lwp)
+{
+	struct sched_entity *se;
+	struct task_struct *p;
+	unsigned long long this_run_delay;
+
+	for (se = __pick_first_entity(cfs_rq); se; se = __pick_next_entity(se)) {
+		if (entity_is_task(se)) {
+			p = task_of(se);
+
+			if (unlikely(task_has_idle_policy(p)))
+				continue;
+
+			this_run_delay = run_delay(p);
+			if (unlikely(this_run_delay > lwp->run_delay &&
+						may_pick_task_fair(cfs_rq->rq, p))) {
+				lwp->p = p;
+				lwp->run_delay = this_run_delay;
+			}
+		} else {
+			__pick_long_waiter(se->my_q, lwp);
+		}
+	}
+}
+
+static struct task_struct *pick_long_waiter(struct rq *rq)
+{
+	struct long_waiter_pick lwp = { 0 };
+
+	if (!sched_core_enabled(rq))
+		return NULL;
+
+	lwp.run_delay = long_run_delay(rq);
+
+	__pick_long_waiter(&rq->cfs, &lwp);
+
+	return lwp.p;
+}
+#else
+# define long_run_delay(rq)		sysctl_sched_latency
+# define is_long_run_delay(rq, d)	((d) > long_run_delay(rq))
+# define pick_long_waiter(rq)		NULL
+#endif /* defined CONFIG_SCHED_INFO */
+
+static struct task_struct *pick_task_fair(struct rq *rq)
+{
+	struct sched_entity *se;
+	struct cfs_rq *cfs_rq;
+	struct task_struct *p;
+
+	p = pick_long_waiter(rq);
+	if (p)
+		return p;
+
+again:
+	cfs_rq = &rq->cfs;
+	if (!cfs_rq->nr_running)
+		return NULL;
+
+	do {
+		struct sched_entity *curr = cfs_rq->curr;
+
+		/* When we pick for a remote RQ, we'll not have done put_prev_entity() */
+		if (curr) {
+			if (curr->on_rq)
+				update_curr(cfs_rq);
+			else
+				curr = NULL;
+
+			if (unlikely(check_cfs_rq_runtime(cfs_rq)))
+				goto again;
+		}
+
+		se = pick_next_entity(cfs_rq);
+		cfs_rq = group_cfs_rq(se);
+	} while (cfs_rq);
+
+	return task_of(se);
+}
+#endif /* CONFIG_SMP */
 
 struct task_struct *
 pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
@@ -12809,6 +12875,7 @@ bool cfs_prio_less(const struct task_struct *a, const struct task_struct *b,
 	struct cfs_rq *cfs_rqa;
 	struct cfs_rq *cfs_rqb;
 	s64 delta;
+	unsigned long long run_delay_a, run_delay_b;
 
 	SCHED_WARN_ON(task_rq(b)->core != rq->core);
 
@@ -12840,6 +12907,14 @@ bool cfs_prio_less(const struct task_struct *a, const struct task_struct *b,
 #else
 	cfs_rqa = &task_rq(a)->cfs;
 	cfs_rqb = &task_rq(b)->cfs;
+#endif
+
+#if defined(CONFIG_SCHED_CORE) && defined(CONFIG_SCHED_INFO)
+	run_delay_a = run_delay(a);
+	run_delay_b = run_delay(b);
+	if (unlikely(is_long_run_delay(rq, run_delay_a) || is_long_run_delay(rq, run_delay_b))) {
+		return run_delay_b > run_delay_a;
+	}
 #endif
 
 	/*

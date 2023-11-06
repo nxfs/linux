@@ -320,7 +320,7 @@ static struct task_struct *sched_core_best(struct rq *rq, unsigned long cookie,
 	struct task_struct *best = sched_core_find(rq, cookie);
 	struct task_struct *p = best;
 
-	if (best == rq->idle)
+	if (best == NULL)
 		return best;
 
 	while ((p = sched_core_next(p, cookie))) {
