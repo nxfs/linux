@@ -8416,6 +8416,68 @@ static bool may_pick_task_fair(struct rq *rq, struct task_struct *task)
 }
 
 #if defined(CONFIG_SCHED_INFO)
+
+#define OVERFLOW_WEIGHT_RATIO U64_MAX
+#define WEIGHT_RATIO_ONE ((u64)1 << NICE_0_LOAD_SHIFT)
+
+/*
+ * Ratio of se's cfs_rq's weight to se's weight in NICE_0_LOAD_SHIFT-bit fixed-point.
+ */
+static inline u64 calc_se_weight_ratio(struct sched_entity *se)
+{
+	u64 se_weight_ratio = calc_delta_fair(se->cfs_rq->load.weight, se);
+	/*
+	 * We never expect weight ratios to be less than one, although in
+	 * practice this occurs occasionally due to fixed-point division
+	 * inaccuracies.
+	 * Clamp up to one to avoid invalid overflow detection.
+	 */
+	return se_weight_ratio < WEIGHT_RATIO_ONE ? WEIGHT_RATIO_ONE : se_weight_ratio;
+}
+
+/*
+ * Product of two weight ratios in NICE_0_LOAD_SHIFT-bit fixed-point.
+ */
+static inline u64 mul_weight_ratios(u64 weight_ratio1, u64 weight_ratio2)
+{
+	u64 weight_ratio = (weight_ratio1 * weight_ratio2) >> NICE_0_LOAD_SHIFT;
+
+	if (unlikely(weight_ratio < weight_ratio1 || weight_ratio < weight_ratio2))
+	    weight_ratio = OVERFLOW_WEIGHT_RATIO;
+
+	return weight_ratio;
+}
+
+/*
+ * Minimum expected timeslice in ns.
+ * Essentially sysctl_sched_base_slice timeslice ending just after a tick,
+ *   and running on for a full extra tick.
+ */
+static inline u64 fair_min_timeslice_ns(void)
+{
+	u64 fair_min_timeslice = (u64)sysctl_sched_base_slice;
+#ifndef CONFIG_HRTICK
+	fair_min_timeslice += (u64)TICK_NSEC;
+#endif
+	return fair_min_timeslice;
+}
+
+/*
+ * Expected period between timeslices in ns for a task of the given weight ratio.
+ * This is an underestimate in the case we end up below the target CFS latency.
+ * Weight ratio is in NICE_0_LOAD_SHIFT-bit fixed-point.
+ */
+static inline u64 fair_timeslice_period_ns(u64 weight_ratio)
+{
+	u64 min_timeslice_ns = fair_min_timeslice_ns();
+	/*
+	 * Just happens to do what we need, including shift and overflow,
+	 *   as long as min_timeslice_ns < WEIGHT_RATIO_ONE.
+	 */
+	WARN_ON_ONCE(min_timeslice_ns < WEIGHT_RATIO_ONE);
+	return mul_weight_ratios(min_timeslice_ns, weight_ratio);
+}
+
 static inline unsigned long long long_run_delay(struct rq *rq)
 {
 	// TODO: fix this
@@ -8432,13 +8494,17 @@ struct long_waiter_pick {
 	unsigned long long run_delay;
 };
 
-static void __pick_long_waiter(struct cfs_rq *cfs_rq, struct long_waiter_pick *lwp)
+static void __pick_long_waiter(struct cfs_rq *cfs_rq, u64 weight_ratio, struct long_waiter_pick *lwp)
 {
 	struct sched_entity *se;
+	u64 se_weight_ratio;
 	struct task_struct *p;
 	unsigned long long this_run_delay;
 
 	for (se = __pick_first_entity(cfs_rq); se; se = __pick_next_entity(se)) {
+
+		se_weight_ratio = mul_weight_ratios(weight_ratio, calc_se_weight_ratio(se));
+
 		if (entity_is_task(se)) {
 			p = task_of(se);
 
@@ -8446,13 +8512,15 @@ static void __pick_long_waiter(struct cfs_rq *cfs_rq, struct long_waiter_pick *l
 				continue;
 
 			this_run_delay = run_delay(p);
+
 			if (unlikely(this_run_delay > lwp->run_delay &&
+						this_run_delay > fair_timeslice_period_ns(se_weight_ratio) &&
 						may_pick_task_fair(cfs_rq->rq, p))) {
 				lwp->p = p;
 				lwp->run_delay = this_run_delay;
 			}
 		} else {
-			__pick_long_waiter(se->my_q, lwp);
+			__pick_long_waiter(se->my_q, se_weight_ratio, lwp);
 		}
 	}
 }
@@ -8466,7 +8534,7 @@ static struct task_struct *pick_long_waiter(struct rq *rq)
 
 	lwp.run_delay = long_run_delay(rq);
 
-	__pick_long_waiter(&rq->cfs, &lwp);
+	__pick_long_waiter(&rq->cfs, WEIGHT_RATIO_ONE, &lwp);
 
 	return lwp.p;
 }
