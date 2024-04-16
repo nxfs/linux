@@ -33,17 +33,20 @@ static void set_next_task_stop(struct rq *rq, struct task_struct *stop, bool fir
 	stop->se.exec_start = rq_clock_task(rq);
 }
 
-static struct task_struct *pick_task_stop(struct rq *rq)
+static struct sched_pick_task_result pick_task_stop(struct rq *rq)
 {
-	if (!sched_stop_runnable(rq))
-		return NULL;
+	struct sched_pick_task_result sptr = { .p = NULL, .type = SPTT_TASK };
 
-	return rq->stop;
+	if (!sched_stop_runnable(rq))
+		return sptr;
+
+	sptr.p = rq->stop;
+	return sptr;
 }
 
 static struct task_struct *pick_next_task_stop(struct rq *rq)
 {
-	struct task_struct *p = pick_task_stop(rq);
+	struct task_struct *p = pick_task_stop(rq).p;
 
 	if (p)
 		set_next_task_stop(rq, p, true);

@@ -447,9 +447,10 @@ static void set_next_task_idle(struct rq *rq, struct task_struct *next, bool fir
 }
 
 #ifdef CONFIG_SMP
-static struct task_struct *pick_task_idle(struct rq *rq)
+static struct sched_pick_task_result pick_task_idle(struct rq *rq)
 {
-	return rq->idle;
+	struct sched_pick_task_result sptr = { .p = rq->idle, .type = SPTT_TASK };
+	return sptr;
 }
 #endif
 

@@ -179,11 +179,11 @@ static inline int __task_prio(const struct task_struct *p)
  */
 
 /* real prio, less is less */
-static inline bool prio_less(const struct task_struct *a,
-			     const struct task_struct *b, bool in_fi)
+static inline bool prio_less(const struct sched_pick_task_result a,
+		             const struct sched_pick_task_result b, bool in_fi)
 {
 
-	int pa = __task_prio(a), pb = __task_prio(b);
+	int pa = __task_prio(a.p), pb = __task_prio(b.p);
 
 	if (-pa < -pb)
 		return true;
@@ -192,7 +192,7 @@ static inline bool prio_less(const struct task_struct *a,
 		return false;
 
 	if (pa == -1) /* dl_prio() doesn't work because of stop_class above */
-		return !dl_time_before(a->dl.deadline, b->dl.deadline);
+		return !dl_time_before(a.p->dl.deadline, b.p->dl.deadline);
 
 	if (pa == MAX_RT_PRIO + MAX_NICE)	/* fair */
 		return cfs_prio_less(a, b, in_fi);
@@ -317,21 +317,23 @@ static struct task_struct *sched_core_find(struct rq *rq, unsigned long cookie)
 static struct task_struct *sched_core_best(struct rq *rq, unsigned long cookie,
 					   bool in_fi)
 {
-	struct task_struct *best = sched_core_find(rq, cookie);
-	struct task_struct *p = best;
+	struct sched_pick_task_result best = { .type = SPTT_TASK };
+	struct sched_pick_task_result sptr = best;
+	best.p = sched_core_find(rq, cookie);
 
-	if (best == NULL)
-		return best;
+	if (best.p == NULL)
+		return best.p;
 
-	while ((p = sched_core_next(p, cookie))) {
-		if (prio_less(best, p, in_fi))
-			best = p;
+	sptr.p = best.p;
+	while ((sptr.p = sched_core_next(sptr.p, cookie))) {
+		if (prio_less(best, sptr, in_fi))
+			best = sptr;
 	}
 
-	if (may_pick_task(rq, best))
-		return best;
+	if (may_pick_task(rq, best.p))
+		return best.p;
 
-	return idle_sched_class.pick_task(rq);
+	return idle_sched_class.pick_task(rq).p;
 }
 
 /*
@@ -6144,15 +6146,15 @@ static inline bool cookie_match(struct task_struct *a, struct task_struct *b)
 	return a->core_cookie == b->core_cookie;
 }
 
-static inline struct task_struct *pick_task(struct rq *rq)
+static inline struct sched_pick_task_result pick_task(struct rq *rq)
 {
+	struct sched_pick_task_result sptr;
 	const struct sched_class *class;
-	struct task_struct *p;
 
 	for_each_class(class) {
-		p = class->pick_task(rq);
-		if (p)
-			return p;
+		sptr = class->pick_task(rq);
+		if (sptr.p)
+			return sptr;
 	}
 
 	BUG(); /* The idle class should always have a runnable task. */
@@ -6165,7 +6167,8 @@ static void queue_core_balance(struct rq *rq);
 static struct task_struct *
 pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
-	struct task_struct *next, *p, *max = NULL;
+	struct task_struct *next, *p;
+	struct sched_pick_task_result pick, best_pick;
 	const struct cpumask *smt_mask;
 	bool fi_before = false;
 	bool core_clock_updated = (rq == rq->core);
@@ -6252,7 +6255,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	 * and there are no cookied tasks running on siblings.
 	 */
 	if (!need_sync) {
-		next = pick_task(rq);
+		next = pick_task(rq).p;
 		if (!next->core_cookie) {
 			rq->core_pick = NULL;
 			/*
@@ -6271,6 +6274,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	 *
 	 * Tie-break prio towards the current CPU
 	 */
+	best_pick.p = NULL;
 	for_each_cpu_wrap(i, smt_mask, cpu) {
 		rq_i = cpu_rq(i);
 
@@ -6282,12 +6286,13 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 		if (i != cpu && (rq_i != rq->core || !core_clock_updated))
 			update_rq_clock(rq_i);
 
-		p = rq_i->core_pick = pick_task(rq_i);
-		if (!max || prio_less(max, p, fi_before))
-			max = p;
+		pick = pick_task(rq_i);
+		rq_i->core_pick = pick.p;
+		if (!best_pick.p || prio_less(best_pick, pick, fi_before))
+			best_pick = pick;
 	}
 
-	cookie = rq->core->core_cookie = max->core_cookie;
+	cookie = rq->core->core_cookie = best_pick.p->core_cookie;
 
 	/*
 	 * For each thread: try and find a runnable task that matches @max or
@@ -6302,7 +6307,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 			if (cookie)
 				p = sched_core_best(rq_i, cookie, fi_before);
 			if (!p)
-				p = idle_sched_class.pick_task(rq_i);
+				p = idle_sched_class.pick_task(rq_i).p;
 		}
 
 		rq_i->core_pick = p;

@@ -1291,8 +1291,10 @@ static inline raw_spinlock_t *__rq_lockp(struct rq *rq)
 	return &rq->__lock;
 }
 
-bool cfs_prio_less(const struct task_struct *a, const struct task_struct *b,
-			bool fi);
+struct sched_pick_task_result;
+bool cfs_prio_less(struct sched_pick_task_result a,
+		struct sched_pick_task_result b,
+		bool fi);
 void task_vruntime_update(struct rq *rq, struct task_struct *p, bool in_fi);
 
 /*
@@ -2278,6 +2280,18 @@ extern const u32		sched_prio_to_wmult[40];
 
 #define RETRY_TASK		((void *)-1UL)
 
+# ifdef CONFIG_SMP
+enum sched_pick_task_type {
+	SPTT_TASK,
+	SPTT_LONG_WAITER_TASK,
+};
+
+struct sched_pick_task_result {
+	struct task_struct *p;
+	enum sched_pick_task_type type;
+};
+#endif
+
 struct affinity_context {
 	const struct cpumask *new_mask;
 	struct cpumask *user_mask;
@@ -2308,7 +2322,7 @@ struct sched_class {
 	int (*balance)(struct rq *rq, struct task_struct *prev, struct rq_flags *rf);
 	int  (*select_task_rq)(struct task_struct *p, int task_cpu, int flags);
 
-	struct task_struct * (*pick_task)(struct rq *rq);
+	struct sched_pick_task_result (*pick_task)(struct rq *rq);
 	bool (*may_pick_task)(struct rq *rq, struct task_struct *task);
 
 	void (*migrate_task_rq)(struct task_struct *p, int new_cpu);

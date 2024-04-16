@@ -2082,40 +2082,40 @@ static struct sched_dl_entity *pick_next_dl_entity(struct dl_rq *dl_rq)
 	return __node_2_dle(left);
 }
 
-static struct task_struct *pick_task_dl(struct rq *rq)
+static struct sched_pick_task_result pick_task_dl(struct rq *rq)
 {
+	struct sched_pick_task_result sptr = { .p = NULL, .type = SPTT_TASK };
 	struct sched_dl_entity *dl_se;
 	struct dl_rq *dl_rq = &rq->dl;
-	struct task_struct *p;
 
 again:
 	if (!sched_dl_runnable(rq))
-		return NULL;
+		return sptr;
 
 	dl_se = pick_next_dl_entity(dl_rq);
 	WARN_ON_ONCE(!dl_se);
 
 	if (dl_server(dl_se)) {
-		p = dl_se->server_pick(dl_se);
-		if (!p) {
+		sptr.p = dl_se->server_pick(dl_se);
+		if (!sptr.p) {
 			WARN_ON_ONCE(1);
 			dl_se->dl_yielded = 1;
 			update_curr_dl_se(rq, dl_se, 0);
 			goto again;
 		}
-		p->dl_server = dl_se;
+		sptr.p->dl_server = dl_se;
 	} else {
-		p = dl_task_of(dl_se);
+		sptr.p = dl_task_of(dl_se);
 	}
 
-	return p;
+	return sptr;
 }
 
 static struct task_struct *pick_next_task_dl(struct rq *rq)
 {
 	struct task_struct *p;
 
-	p = pick_task_dl(rq);
+	p = pick_task_dl(rq).p;
 	if (!p)
 		return p;
 

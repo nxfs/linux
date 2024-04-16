@@ -8451,17 +8451,6 @@ static inline u64 fair_timeslice_period_ns(u64 weight_ratio)
 	return mul_weight_ratios(min_timeslice_ns, weight_ratio);
 }
 
-static inline unsigned long long long_run_delay(struct rq *rq)
-{
-	// TODO: fix this
-	return max(rq->cfs.h_nr_running * sysctl_sched_base_slice, sysctl_sched_base_slice * 10);
-}
-
-static inline bool is_long_run_delay(struct rq *rq, unsigned long long run_delay)
-{
-	return unlikely(run_delay > long_run_delay(rq));
-}
-
 struct long_waiter_pick {
 	struct task_struct *p;
 	unsigned long long run_delay;
@@ -8505,7 +8494,16 @@ static struct task_struct *pick_long_waiter(struct rq *rq)
 	if (!sched_core_enabled(rq))
 		return NULL;
 
-	lwp.run_delay = long_run_delay(rq);
+	/*
+	 * Precondition for the minimal run delay at which a task might be
+	 * considered as long waiter candidate. Clamping it to the minimum
+	 * expected run time for a run queue with four contending tasks ensures
+	 * that long waiters logic doesn't kick in too aggressively on
+	 * lightly contended run queues: we only care about eliminating large
+	 * run delay outliers.
+	 */
+	lwp.run_delay = sysctl_sched_base_slice *
+		max_t(unsigned int, 8u, rq->cfs.h_nr_running);
 
 	__pick_long_waiter(&rq->cfs, WEIGHT_RATIO_ONE, &lwp);
 
@@ -8517,20 +8515,22 @@ static struct task_struct *pick_long_waiter(struct rq *rq)
 # define pick_long_waiter(rq)		NULL
 #endif /* defined CONFIG_SCHED_INFO */
 
-static struct task_struct *pick_task_fair(struct rq *rq)
+static struct sched_pick_task_result pick_task_fair(struct rq *rq)
 {
 	struct sched_entity *se;
 	struct cfs_rq *cfs_rq;
-	struct task_struct *p;
+	struct sched_pick_task_result sptr = { .p = NULL, .type = SPTT_TASK };
 
-	p = pick_long_waiter(rq);
-	if (p)
-		return p;
+	sptr.p = pick_long_waiter(rq);
+	if (unlikely(sptr.p)) {
+		sptr.type = SPTT_LONG_WAITER_TASK;
+		return sptr;
+	}
 
 again:
 	cfs_rq = &rq->cfs;
 	if (!cfs_rq->nr_running)
-		return NULL;
+		return sptr;
 
 	do {
 		struct sched_entity *curr = cfs_rq->curr;
@@ -8550,7 +8550,8 @@ again:
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
-	return task_of(se);
+	sptr.p = task_of(se);
+	return sptr;
 }
 #endif /* CONFIG_SMP */
 
@@ -12907,9 +12908,11 @@ void task_vruntime_update(struct rq *rq, struct task_struct *p, bool in_fi)
 	se_fi_update(se, rq->core->core_forceidle_seq, in_fi);
 }
 
-bool cfs_prio_less(const struct task_struct *a, const struct task_struct *b,
-			bool in_fi)
+bool cfs_prio_less(struct sched_pick_task_result spta,
+		struct sched_pick_task_result sptb,
+		bool in_fi)
 {
+	struct task_struct *a = spta.p, *b = sptb.p;
 	struct rq *rq = task_rq(a);
 	const struct sched_entity *sea = &a->se;
 	const struct sched_entity *seb = &b->se;
@@ -12953,7 +12956,7 @@ bool cfs_prio_less(const struct task_struct *a, const struct task_struct *b,
 #if defined(CONFIG_SCHED_CORE) && defined(CONFIG_SCHED_INFO)
 	run_delay_a = run_delay(a);
 	run_delay_b = run_delay(b);
-	if (unlikely(is_long_run_delay(rq, run_delay_a) || is_long_run_delay(rq, run_delay_b))) {
+	if (unlikely(spta.type == SPTT_LONG_WAITER_TASK || sptb.type == SPTT_LONG_WAITER_TASK)) {
 		return run_delay_b > run_delay_a;
 	}
 #endif

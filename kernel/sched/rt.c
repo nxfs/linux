@@ -1744,21 +1744,20 @@ static struct task_struct *_pick_next_task_rt(struct rq *rq)
 	return rt_task_of(rt_se);
 }
 
-static struct task_struct *pick_task_rt(struct rq *rq)
+static struct sched_pick_task_result pick_task_rt(struct rq *rq)
 {
-	struct task_struct *p;
+	struct sched_pick_task_result sptr = { .p = NULL, .type = SPTT_TASK };
 
 	if (!sched_rt_runnable(rq))
-		return NULL;
+		return sptr;
 
-	p = _pick_next_task_rt(rq);
-
-	return p;
+	sptr.p = _pick_next_task_rt(rq);
+	return sptr;
 }
 
 static struct task_struct *pick_next_task_rt(struct rq *rq)
 {
-	struct task_struct *p = pick_task_rt(rq);
+	struct task_struct *p = pick_task_rt(rq).p;
 
 	if (p)
 		set_next_task_rt(rq, p, true);
